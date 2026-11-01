@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">录屏助手</string>
+
+    <string name="notification_channel_name">屏幕录制</string>
+    <string name="notification_channel_description">录制过程中显示状态与快捷操作</string>
+
+    <string name="notification_title_preparing">正在准备录制…</string>
+    <string name="notification_title_recording">正在录制屏幕</string>
+    <string name="notification_title_paused">录制已暂停</string>
+    <string name="notification_action_pause">暂停</string>
+    <string name="notification_action_resume">继续</string>
+    <string name="notification_action_stop">停止</string>
+
+    <string name="recording_denied">未授予录屏权限，已取消录制</string>
+    <string name="recording_failed">录制失败：%1$s</string>
+</resources>
