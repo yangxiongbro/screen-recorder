@@ -6,6 +6,7 @@ import android.media.MediaFormat
 import android.os.Build
 import android.util.Log
 import android.view.Surface
+import com.screenrecorder.app.core.EncoderSupport
 import java.nio.ByteBuffer
 
 /**
@@ -18,6 +19,7 @@ internal class VideoEncoder(
     mimeType: String,
     val width: Int,
     val height: Int,
+    /** Target bit rate in bits per second, as required by [MediaFormat.KEY_BIT_RATE]. */
     bitrate: Int,
     frameRate: Int,
     private val onFormat: (MediaFormat) -> Unit,
@@ -35,25 +37,44 @@ internal class VideoEncoder(
     private var drainThread: Thread? = null
 
     init {
-        val format = MediaFormat.createVideoFormat(mimeType, width, height).apply {
-            setInteger(
-                MediaFormat.KEY_COLOR_FORMAT,
-                MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface,
-            )
-            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-            setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        try {
+            val format = MediaFormat.createVideoFormat(mimeType, width, height).apply {
                 setInteger(
-                    MediaFormat.KEY_BITRATE_MODE,
-                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR,
+                    MediaFormat.KEY_COLOR_FORMAT,
+                    MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface,
                 )
+                setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+                setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    setInteger(
+                        MediaFormat.KEY_BITRATE_MODE,
+                        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR,
+                    )
+                }
+                // Frame pacing is handled by GlFramePump, which feeds this surface at a fixed rate.
+                // High profile compresses screen content noticeably better at the same bitrate.
+                EncoderSupport.preferredProfileLevel(mimeType, width, height)?.let { profile ->
+                    setInteger(MediaFormat.KEY_PROFILE, profile.profile)
+                    setInteger(MediaFormat.KEY_LEVEL, profile.level)
+                }
             }
-            // Frame pacing is handled by GlFramePump, which feeds this surface at a fixed rate.
+            try {
+                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            } catch (t: Throwable) {
+                if (!format.containsKey(MediaFormat.KEY_PROFILE)) throw t
+                Log.w(TAG, "configure() with explicit profile failed, retrying with defaults", t)
+                format.removeKey(MediaFormat.KEY_PROFILE)
+                format.removeKey(MediaFormat.KEY_LEVEL)
+                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            }
+            inputSurface = codec.createInputSurface()
+            codec.start()
+        } catch (t: Throwable) {
+            // Never leak a half configured codec: the engine retries with another size.
+            runCatching { codec.release() }
+            throw t
         }
-        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        inputSurface = codec.createInputSurface()
-        codec.start()
         drainThread = Thread({ drainLoop() }, "VideoEncoderDrain").apply {
             priority = Thread.MAX_PRIORITY
             start()

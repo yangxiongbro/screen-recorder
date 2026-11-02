@@ -11,6 +11,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.util.Size
 import com.screenrecorder.app.apps.ForegroundAppMonitor
+import com.screenrecorder.app.core.EncoderSupport
 import com.screenrecorder.app.core.RecorderSettings
 import com.screenrecorder.app.storage.RecordingOutput
 import com.screenrecorder.app.storage.RecordingStorage
@@ -125,7 +126,7 @@ class RecordingEngine(
     }
 
     private fun startSegmentLocked(displayWidth: Int, displayHeight: Int) {
-        val captureSize = settings.captureSize(displayWidth, displayHeight)
+        val desiredSize = settings.captureSize(displayWidth, displayHeight)
         val output = storage.create(sessionStamp, 0)
 
         var muxer: Mp4Muxer? = null
@@ -147,27 +148,29 @@ class RecordingEngine(
             )
             muxer = localMuxer
 
-            val localVideo = VideoEncoder(
-                mimeType = settings.codec.mimeType,
-                width = captureSize.width,
-                height = captureSize.height,
-                bitrate = settings.videoBitrateKbps(captureSize.width, captureSize.height),
-                frameRate = settings.frameRate.fps,
-                onFormat = { format -> localMuxer.addTrack(TRACK_VIDEO, format) },
-                onSample = { buffer, ptsUs, flags ->
-                    val pts = clock.translateIfActive(ptsUs)
-                    if (pts >= 0L) localMuxer.write(TRACK_VIDEO, buffer, pts, flags)
-                },
-                onError = ::reportPipelineError,
-            )
-            video = localVideo
+            // Try the exact display size first; only step down when the real encoder refuses it.
+            var captureSize: Size? = null
+            for (candidate in EncoderSupport.candidateSizes(settings.codec.mimeType, desiredSize)) {
+                val encoder = runCatching { createVideoEncoder(candidate, localMuxer, clock) }
+                    .onFailure {
+                        Log.w(TAG, "encoder rejected ${candidate.width}x${candidate.height}", it)
+                    }
+                    .getOrNull()
+                if (encoder != null) {
+                    video = encoder
+                    captureSize = candidate
+                    break
+                }
+            }
+            val localVideo = requireNotNull(video) { "没有可用的视频编码器，无法以 ${desiredSize.width}x${desiredSize.height} 录制" }
+            val size = requireNotNull(captureSize)
 
             // The pump resamples the mirrored frames at exactly the configured frame rate before
             // they reach the encoder; the VirtualDisplay therefore renders into the pump's surface.
             val localPump = GlFramePump(
                 encoderSurface = localVideo.inputSurface,
-                width = captureSize.width,
-                height = captureSize.height,
+                width = size.width,
+                height = size.height,
                 frameRate = settings.frameRate.fps,
                 onError = ::reportPipelineError,
             )
@@ -176,8 +179,8 @@ class RecordingEngine(
 
             display = projection.createVirtualDisplay(
                 "ScreenRecorder",
-                captureSize.width,
-                captureSize.height,
+                size.width,
+                size.height,
                 DisplayUtils.currentDensityDpi(context),
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 displaySurface,
@@ -208,14 +211,17 @@ class RecordingEngine(
                 pump = localPump,
                 muxer = localMuxer,
                 clock = clock,
-                size = captureSize,
+                size = size,
             )
             lastFileName = output.displayName
             if (paused) {
                 clock.pause()
                 localPump.setPaused(true)
             }
-            Log.i(TAG, "recording started ${captureSize.width}x${captureSize.height}")
+            Log.i(
+                TAG,
+                "recording started ${size.width}x${size.height} (screen ${displayWidth}x$displayHeight)",
+            )
         } catch (t: Throwable) {
             Log.e(TAG, "startSegment failed", t)
             runCatching { display?.release() }
@@ -227,6 +233,25 @@ class RecordingEngine(
             throw t
         }
     }
+
+    private fun createVideoEncoder(
+        size: Size,
+        muxer: Mp4Muxer,
+        clock: TimelineClock,
+    ): VideoEncoder = VideoEncoder(
+        mimeType = settings.codec.mimeType,
+        width = size.width,
+        height = size.height,
+        // MediaFormat.KEY_BIT_RATE is in bits per second, while the settings are stored in Kbps.
+        bitrate = settings.videoBitrateKbps(size.width, size.height) * 1000,
+        frameRate = settings.frameRate.fps,
+        onFormat = { format -> muxer.addTrack(TRACK_VIDEO, format) },
+        onSample = { buffer, ptsUs, flags ->
+            val pts = clock.translateIfActive(ptsUs)
+            if (pts >= 0L) muxer.write(TRACK_VIDEO, buffer, pts, flags)
+        },
+        onError = ::reportPipelineError,
+    )
 
     private fun stopSegmentLocked() {
         val current = segment ?: return

@@ -75,11 +75,12 @@ data class RecorderSettings(
     val hasAudio: Boolean get() = audioSource != AudioSourcePreset.NONE
 
     /**
-     * Scales [displayWidth] x [displayHeight] down to the selected preset and aligns the result
-     * to 16 pixels, which every hardware encoder accepts.
+     * Scales [displayWidth] x [displayHeight] down to the selected preset.
      *
      * The preset refers to the *short* side of the screen, so "1080p" keeps a 1080x2400 portrait
-     * display untouched instead of shrinking it to 480 pixels wide.
+     * display untouched instead of shrinking it to 480 pixels wide. Only even dimensions are
+     * enforced here; the encoder's own alignment is applied later by
+     * [EncoderSupport.resolveCaptureSize] so the mirror never gets needlessly resampled.
      */
     fun captureSize(displayWidth: Int, displayHeight: Int): Size {
         var width = displayWidth.coerceAtLeast(16)
@@ -93,7 +94,7 @@ data class RecorderSettings(
                 height = (height * scale).toInt()
             }
         }
-        return Size(alignTo16(width), alignTo16(height))
+        return Size(makeEven(width), makeEven(height))
     }
 
     fun videoBitrateKbps(width: Int, height: Int): Int {
@@ -103,5 +104,5 @@ data class RecorderSettings(
         return (raw / 1000.0).roundToInt().coerceIn(1_000, 60_000)
     }
 
-    private fun alignTo16(value: Int): Int = (value / 16) * 16
+    private fun makeEven(value: Int): Int = (value / 2) * 2
 }
